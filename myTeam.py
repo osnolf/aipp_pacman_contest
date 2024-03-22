@@ -71,10 +71,17 @@ class ReflexCaptureAgent(CaptureAgent):
         #Dit werkt wel niet bij enemy agents die aan borders blijven
         #laatste implementatie is ga naar het noorden/midden of zuiden om weg te gaan van het defending border ghost
         #self.global_variable = 0
+        self.last_states = []
+        self.successor = 0
+        self.forced_movement = []
+        self.check = 0
 
     def register_initial_state(self, game_state):
         self.start = game_state.get_agent_position(self.index)
         CaptureAgent.register_initial_state(self, game_state)
+        self.midWidth = game_state.data.layout.width / 2
+        self.height = game_state.data.layout.height - 1
+        self.width = game_state.data.layout.width
 
     def choose_action(self, game_state):
         """
@@ -161,12 +168,100 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         hasfood = my_state.num_carrying
         my_pos = my_state.get_position()
         walls = game_state.get_walls().as_list()
-        teamcolored = game_state.is_on_red_team(self.index)
+        teamcolored_red = game_state.is_on_red_team(self.index)
         features['successor_score'] = -len(food_list)  # self.getScore(successor)
         features['retreat'] = 0
         old_state = game_state.get_agent_state(self.index)
         old_food = old_state.num_carrying
         old_pos = old_state.get_position()
+        last_states = self.last_states
+        forced_movement = self.forced_movement
+        retreat_locations = [(0,0),(0,0)]
+
+        x_start = self.start[0]
+        y_start = self.start[1]
+
+        first_retreat_x = 17
+        second_retreat_x = 17
+        first_retreat_y = 1
+        if teamcolored_red:
+            while (first_retreat_x, y_start) in walls:
+                first_retreat_x -= 1
+            while (second_retreat_x, first_retreat_y) in walls:
+                second_retreat_x -= 1
+            retreat_locations[0] = (first_retreat_x, y_start)
+            retreat_locations[1] = (second_retreat_x, first_retreat_y)
+        else:
+            while (first_retreat_x, y_start) in walls:
+                first_retreat_x += 1
+            while (second_retreat_x, first_retreat_y) in walls:
+                second_retreat_x += 1
+            retreat_locations[0] = (first_retreat_x, y_start)
+            retreat_locations[1] = (second_retreat_x, first_retreat_y)
+
+        if len(last_states) < 8 and self.successor == 0:
+            self.last_states.append(old_pos)
+            self.successor += 1
+        elif self.successor == 0:
+            self.last_states.pop()
+            self.last_states.insert(0, old_pos)
+            self.successor += 1
+        elif self.successor == 4:
+            self.successor = 0
+        else:
+            self.successor += 1
+
+        all_unique_last_states = []
+        for state in self.last_states:
+            if state not in all_unique_last_states:
+                all_unique_last_states.append(state)
+
+        def give_surrounding_cords(coordinate):
+            x = coordinate[0]
+            y = coordinate[1]
+            return [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+        def euclidean_distance(coordinate1, coordinate2):
+            return ((coordinate1[0]-coordinate2[0])**2 + (coordinate1[1]-coordinate2[1])**2)**(1/2)
+
+        exit_position = [0]
+
+        def a_star_exit(old_pos, goal_state, wanted_distance):
+            agenda = util.PriorityQueue()
+            agenda.push(item=(old_pos, [], 0), priority=0)
+            visited = []
+            while True:
+                if not agenda.isEmpty():
+                    current_pos, path, UCS = agenda.pop()
+                    if not current_pos in visited:
+                        visited.append(current_pos)
+                        if current_pos == goal_state:
+                            exit_position[0] = path[0:wanted_distance + 1]
+                            break
+                        for new_coordinate in give_surrounding_cords(current_pos):
+                            if not new_coordinate in walls:
+                                UCS = UCS + 1
+                                new_path = path + [new_coordinate]
+                                heuristic = euclidean_distance(new_coordinate, goal_state)
+                                total_cost = UCS + heuristic
+                                agenda.push(item=(new_coordinate, new_path, UCS), priority=total_cost)
+
+        if len(all_unique_last_states) < 5 and len(last_states) == 8 and 12 < old_pos[0] < 20:
+            if old_pos[1] < 5:
+                a_star_exit(old_pos, retreat_locations[0], 16)
+                self.forced_movement = exit_position[0]
+                forced_movement = self.forced_movement
+                self.last_states = []
+            elif old_pos[1] > 10:
+                a_star_exit(old_pos, retreat_locations[1], 16)
+                self.forced_movement = exit_position[0]
+                forced_movement = self.forced_movement
+                self.last_states = []
+            else:
+                a_star_exit(old_pos, retreat_locations[0], 16)
+                self.forced_movement = exit_position[0]
+                forced_movement = self.forced_movement
+                self.last_states = []
+
 
         #Berekend de afstand naar het dichtste eten (onveranderd tegenover baseline team)
         if len(food_list) > 0:
@@ -180,10 +275,12 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         ghost_distance = "safe"
         if len(defenders) > 0 and my_state.is_pacman:
             dists = [self.get_maze_distance(my_pos, a.get_position()) for a in defenders]
-            if min(dists) <= 7:
+            if min(dists) <= 3:
                 features['defender_distance'] = min(dists)
                 features['distance_to_food'] = 0
                 features['retreat'] = self.get_maze_distance(self.start, my_pos)
+                ghost_distance = "dangerous"
+            elif min(dists) <= 7:
                 ghost_distance = "dangerous"
             else:
                 features['defender_distance'] = 0
@@ -194,10 +291,6 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         old_x_p = old_pos[0]
         old_y_p = old_pos[1]
 
-        def give_surrounding_cords(coordinate):
-            x = coordinate[0]
-            y = coordinate[1]
-            return [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
 
         total_exits = [0]
 
@@ -224,7 +317,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         #en ook om te forceren om terug in uw eigen maze te gaan als je meer dan 1 food hebt
         features["risk"] = 0
         features["flat"] = 0
-        if hasfood >= 5:
+        if hasfood >= 3:
             features["flat"] = 100
             features["retreat"] = self.get_maze_distance(self.start, my_pos)
             features['distance_to_food'] = 0
@@ -238,43 +331,43 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                 coordinate = coordinate_array[0]
                 if old_x_p == coordinate[0] and old_y_p == coordinate[1]:
                     Check_List[idx] = []
-            bfs_entry(Check_List, 3, [])
+            bfs_entry(Check_List, 6, [])
 
         #Hier gaan we nooit in een dead end als er een ghost dichtbij is
         if total_exits[0] == 0 and not ghost_distance == "safe" and not old_pos == my_pos:
             features["risk"] = 1
 
         # Hier komt code die eigenlijk de pacman uit dead ends duwt als de ghost te dicht is (want het wilt anders blijven)
-        exit_position = [0]
-        def a_star_exit(old_pos, goal_state):
-            agenda = util.PriorityQueue()
-            agenda.push(item=(old_pos, [], 0), priority=0)
-            visited = []
-            while True:
-                if not agenda.isEmpty():
-                    current_pos, path, UCS = agenda.pop()
-                    if not current_pos in visited:
-                        visited.append(current_pos)
-                        if current_pos == goal_state:
-                            exit_position[0] = path[0]
-                            break
-                        for new_coordinate in give_surrounding_cords(current_pos):
-                            if not new_coordinate in walls:
-                                UCS = UCS + 1
-                                new_path = path + [new_coordinate]
-                                heuristic = self.get_maze_distance(new_coordinate, goal_state)
-                                total_cost = UCS + heuristic
-                                agenda.push(item=(new_coordinate, new_path, UCS), priority=total_cost)
 
         if features['risk'] == 1:
-            a_star_exit(old_pos, self.start)
+            a_star_exit(old_pos, self.start, 0)
             if my_pos == exit_position[0]:
-                features["risk"] = 0.5
+                features["risk"] = 0.1
 
 
         #Ik ben gegaan met het idee dat je als een offensieve agent nooit echt wilt stilstaan
         if old_pos == my_pos:
             features['dontstay'] = 1
+
+        if len(self.forced_movement) > 0:
+            if my_pos in self.forced_movement:
+                features["flat"] = 100000
+                features["distance_to_food"] = 0
+                features["defender_distance"] = 0
+                features["retreat"] = 0
+                features["risk"] = 0
+                forced_movement.remove(my_pos)
+                self.forced_movement = forced_movement
+                self.check = 0
+            else:
+                features["flat"] = -100000
+                features["distance_to_food"] = 0
+                features["defender_distance"] = 0
+                features["retreat"] = 0
+                features["risk"] = 0
+                self.check += 1
+                if self.check > 10:
+                    self.forced_movement = []
 
         return features
     #to do, verander bfs_exit naar line checker (check verschil
@@ -284,7 +377,6 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
     def get_weights(self, game_state, action):
         return {'successor_score': 100, 'distance_to_food': -1, 'defender_distance': 10, 'retreat': -1, 'risk': -10000
             , "flat": 1, 'dontstay': -10000}
-
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
     """
@@ -297,13 +389,82 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
     def get_features(self, game_state, action):
         features = util.Counter()
         successor = self.get_successor(game_state, action)
-
+        teamcolored_red = game_state.is_on_red_team(self.index)
+        Top_border_y = self.height
+        Bottom_border_y = 0
+        walls = game_state.get_walls()
         my_state = successor.get_agent_state(self.index)
         my_pos = my_state.get_position()
+        left_half = int(self.midWidth - 1)
+        right_half = int(self.midWidth + 1)
+
+        # Euclidean distance calculation
+        def euclidean_distance(coordinate1, coordinate2):
+            return ((coordinate1[0] - coordinate2[0]) ** 2 + (coordinate1[1] - coordinate2[1]) ** 2) ** (1 / 2)
+
+        # Generate surrounding coordinates
+        def give_surrounding_cords(coordinate):
+            x = coordinate[0]
+            y = coordinate[1]
+            return [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+
+        # Determine the border based on team color
+        def border_find(is_red):
+            if is_red:
+                return left_half
+            else:
+                return right_half
+
+        border_x = border_find(teamcolored_red)
+
+        # Find position without wall
+        def avoid_top_wall(x, y):
+            if (x, y) not in walls:
+                return (x, y)
+            else:
+                return avoid_top_wall(x, y - 1)
+
+        # Find position without wall
+        def avoid_bottom_wall(x, y):
+            if (x, y) not in walls:
+                return (x, y)
+            else:
+                return avoid_bottom_wall(x, y + 1)
+
+        top_border = avoid_top_wall(border_x, Top_border_y)
+        bottom_border = avoid_bottom_wall(border_x, Bottom_border_y)
+
+        wanted_position = top_border
+        if my_pos[1] == top_border[1]:
+            wanted_position = top_border
+        if my_pos[1] == bottom_border[1]:
+            wanted_position = bottom_border
+
+        # A* search for the patrol path position
+        def a_star_patrol(old_pos, goal_state):
+            agenda = util.PriorityQueue()
+            agenda.push(item=(old_pos, [], 0), priority=0)
+            visited = []
+            while not agenda.isEmpty():
+                    current_pos, path, UCS = agenda.pop()
+                    if  current_pos not in visited:
+                        visited.append(current_pos)
+                        if current_pos == goal_state:
+                            return path
+                        for new_coordinate in give_surrounding_cords(current_pos):
+                            if new_coordinate not in walls:
+                                UCS = UCS + 1
+                                new_path = path + [new_coordinate]
+                                heuristic = euclidean_distance(new_coordinate, goal_state)
+                                total_cost = UCS + heuristic
+                                agenda.push(item=(new_coordinate, new_path, UCS), priority=total_cost)
+
+        #patrole_path = a_star_exit(my_pos, wanted_position, 0)
+        patrole_path = a_star_patrol(my_pos, wanted_position)
+        features['on_border_patrol'] = 1 if my_pos in patrole_path else 0
 
         # Computes whether we're on defense (1) or offense (0)
-        features['on_defense'] = 1
-        if my_state.is_pacman: features['on_defense'] = 0
+        features['on_defense'] = 1 if my_state.is_pacman else 0
 
         # Computes distance to invaders we can see
         enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
@@ -313,11 +474,28 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
             dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
             features['invader_distance'] = min(dists)
 
-        if action == Directions.STOP: features['stop'] = 1
+        features['stop'] = 1 if action == Directions.STOP else 0
         rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
-        if action == rev: features['reverse'] = 1
+        features['reverse'] = 1 if action == rev else 0
 
+        # Attack mode
+        features['on_hunt'] = 1 if len(invaders) > 0 else 0
         return features
 
     def get_weights(self, game_state, action):
-        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}
+        if game_state.get_agent_state(self.index).scared_timer > 0:
+            return {'num_invaders': 0,
+                    'on_defense': 200,
+                    'invader_distance': 0,
+                    'stop': -10,
+                    'reverse': -2,
+                    'on_border_patrol': 4000,
+                    'on_hunt': 0}
+        else:
+            return {'num_invaders': -10000,
+                    'on_defense': 300,
+                    'invader_distance': -10,
+                    'stop': -10,
+                    'reverse': -2,
+                    'on_border_patrol': 4000,
+                    'on_hunt': 10000}
